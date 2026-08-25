@@ -126,25 +126,71 @@ function updateUI(){
 }
 
 function inpaint(source, maskData, w, h) {
-  const out = new Uint8ClampedArray(source.data); const masked = new Uint8Array(w*h); let remaining=0;
-  for(let i=0;i<w*h;i++){if(maskData[i*4+3]>20){masked[i]=1;remaining++;}}
-  const queued=new Uint8Array(w*h), queue=[]; const offsets=[-w-1,-w,-w+1,-1,1,w-1,w,w+1];
-  const isBoundary=(i)=>{const x=i%w,y=(i/w)|0;if(x===0||x===w-1||y===0||y===h-1)return true;return offsets.some(d=>!masked[i+d]);};
-  for(let i=0;i<masked.length;i++)if(masked[i]&&isBoundary(i)){queue.push(i);queued[i]=1;}
-  let head=0;
-  while(head<queue.length){
-    const i=queue[head++],x=i%w,y=(i/w)|0; let rs=0,gs=0,bs=0,as=0,count=0;
-    for(let dy=-2;dy<=2;dy++)for(let dx=-2;dx<=2;dx++){
-      const nx=x+dx,ny=y+dy;if(nx<0||ny<0||nx>=w||ny>=h)continue;const ni=ny*w+nx;
-      if(!masked[ni]){const weight=dx===0||dy===0?2:1, p=ni*4;rs+=out[p]*weight;gs+=out[p+1]*weight;bs+=out[p+2]*weight;as+=out[p+3]*weight;count+=weight;}
+  const size = w * h;
+  const out = new Uint8ClampedArray(source.data);
+  let masked = new Uint8Array(size);
+  for (let i = 0; i < size; i++) if (maskData.data[i * 4 + 3] > 20) masked[i] = 1;
+
+  // Expand the user's stroke by two pixels so anti-aliased watermark edges are not sampled as clean color.
+  for (let pass = 0; pass < 2; pass++) {
+    const expanded = masked.slice();
+    for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+      const i = y * w + x;
+      if (masked[i]) continue;
+      if (masked[i - 1] || masked[i + 1] || masked[i - w] || masked[i + w]) expanded[i] = 1;
     }
-    if(count){const p=i*4;out[p]=rs/count;out[p+1]=gs/count;out[p+2]=bs/count;out[p+3]=as/count;masked[i]=0;remaining--;}
-    for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++){const nx=x+dx,ny=y+dy;if(nx<0||ny<0||nx>=w||ny>=h)continue;const ni=ny*w+nx;if(masked[ni]&&!queued[ni]&&isBoundary(ni)){queue.push(ni);queued[ni]=1;}}
+    masked = expanded;
   }
-  // Lightly blend repaired pixels with their neighbors to avoid visible propagation bands.
-  const blended=new Uint8ClampedArray(out);
-  for(let y=1;y<h-1;y++)for(let x=1;x<w-1;x++){const i=y*w+x;if(maskData[i*4+3]<=20)continue;for(let c=0;c<3;c++){let sum=0;for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++)sum+=out[((y+dy)*w+x+dx)*4+c];blended[i*4+c]=sum/9;}}
-  return new ImageData(blended,w,h);
+
+  // Precompute the nearest clean source pixel in all four directions.
+  const left = new Int32Array(size), right = new Int32Array(size), top = new Int32Array(size), bottom = new Int32Array(size);
+  left.fill(-1); right.fill(-1); top.fill(-1); bottom.fill(-1);
+  for (let y = 0; y < h; y++) {
+    let known = -1;
+    for (let x = 0; x < w; x++) { const i = y * w + x; if (!masked[i]) known = i; else left[i] = known; }
+    known = -1;
+    for (let x = w - 1; x >= 0; x--) { const i = y * w + x; if (!masked[i]) known = i; else right[i] = known; }
+  }
+  for (let x = 0; x < w; x++) {
+    let known = -1;
+    for (let y = 0; y < h; y++) { const i = y * w + x; if (!masked[i]) known = i; else top[i] = known; }
+    known = -1;
+    for (let y = h - 1; y >= 0; y--) { const i = y * w + x; if (!masked[i]) known = i; else bottom[i] = known; }
+  }
+
+  const interpolate = (a, b, distanceA, distanceB, channel) => {
+    const total = distanceA + distanceB;
+    return (source.data[a * 4 + channel] * distanceB + source.data[b * 4 + channel] * distanceA) / total;
+  };
+
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = y * w + x;
+    if (!masked[i]) continue;
+    const li = left[i], ri = right[i], ti = top[i], bi = bottom[i];
+    const horizontalSpan = li >= 0 && ri >= 0 ? (ri % w) - (li % w) : 0;
+    const verticalSpan = ti >= 0 && bi >= 0 ? ((bi / w) | 0) - ((ti / w) | 0) : 0;
+
+    for (let c = 0; c < 4; c++) {
+      let sum = 0, weight = 0;
+      if (horizontalSpan) {
+        const dl = x - (li % w), dr = (ri % w) - x;
+        const pairWeight = 1 / horizontalSpan;
+        sum += interpolate(li, ri, dl, dr, c) * pairWeight; weight += pairWeight;
+      }
+      if (verticalSpan) {
+        const dt = y - ((ti / w) | 0), db = ((bi / w) | 0) - y;
+        const pairWeight = 1 / verticalSpan;
+        sum += interpolate(ti, bi, dt, db, c) * pairWeight; weight += pairWeight;
+      }
+      if (!weight) {
+        const candidates = [li, ri, ti, bi].filter(v => v >= 0);
+        if (candidates.length) sum = source.data[candidates[0] * 4 + c], weight = 1;
+      }
+      if (weight) out[i * 4 + c] = sum / weight;
+    }
+  }
+
+  return new ImageData(out, w, h);
 }
 
 els.restore.addEventListener('click',()=>{
