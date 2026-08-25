@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="在浏览器本地涂抹并修复图片水印区域。" />
+    <title>净痕 · 图片修复工具</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="#" aria-label="净痕首页">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i></span>
+        <span>净痕</span>
+      </a>
+      <div class="privacy-note"><span></span> 图片仅在本机处理</div>
+      <button class="ghost-button" id="newImageButton" type="button" disabled>打开新图片</button>
+    </header>
+
+    <main>
+      <section class="intro" id="introPanel">
+        <div class="intro-copy">
+          <p class="eyebrow">LOCAL IMAGE RESTORATION</p>
+          <h1>把多余的痕迹，<br /><em>留在画面之外。</em></h1>
+          <p class="lede">涂过水印，松开鼠标，剩下的交给像素。适合修复你拥有或获授权的图片素材。</p>
+          <label class="primary-button upload-button" for="fileInput">
+            <span>选择图片</span>
+            <span aria-hidden="true">↗</span>
+          </label>
+          <input id="fileInput" type="file" accept="image/png,image/jpeg,image/webp" hidden />
+          <p class="file-hint">支持 JPG、PNG、WebP · 建议小于 20 MB</p>
+        </div>
+        <button class="drop-stage" id="dropZone" type="button" aria-label="上传图片，或将图片拖到这里">
+          <span class="corner corner-tl"></span><span class="corner corner-tr"></span>
+          <span class="corner corner-bl"></span><span class="corner corner-br"></span>
+          <span class="drop-visual" aria-hidden="true">
+            <span class="scan-line"></span>
+            <svg viewBox="0 0 100 100"><path d="M20 72 42 48l13 14 10-11 17 21H20Z"/><circle cx="67" cy="31" r="7"/></svg>
+          </span>
+          <strong>拖入一张图片</strong>
+          <small>文件不会离开你的浏览器</small>
+        </button>
+      </section>
+
+      <section class="editor" id="editorPanel" hidden>
+        <aside class="tool-rail" aria-label="编辑工具">
+          <button class="tool active" id="brushTool" type="button" aria-pressed="true" title="标记水印区域 (B)">
+            <span class="tool-icon brush-icon" aria-hidden="true"></span><small>涂抹</small>
+          </button>
+          <button class="tool" id="eraserTool" type="button" aria-pressed="false" title="擦除选区 (E)">
+            <span class="tool-icon eraser-icon" aria-hidden="true"></span><small>擦除</small>
+          </button>
+          <span class="rail-divider"></span>
+          <button class="tool" id="undoButton" type="button" disabled title="撤销 (Ctrl+Z)"><span aria-hidden="true">↶</span><small>撤销</small></button>
+          <button class="tool" id="redoButton" type="button" disabled title="重做 (Ctrl+Shift+Z)"><span aria-hidden="true">↷</span><small>重做</small></button>
+        </aside>
+
+        <div class="workspace">
+          <div class="workspace-head">
+            <div>
+              <strong id="fileName">图片</strong>
+              <span id="imageMeta"></span>
+            </div>
+            <div class="zoom-controls">
+              <button id="zoomOut" type="button" aria-label="缩小">−</button>
+              <output id="zoomValue">100%</output>
+              <button id="zoomIn" type="button" aria-label="放大">＋</button>
+              <button id="fitButton" type="button">适应</button>
+            </div>
+          </div>
+          <div class="canvas-viewport" id="canvasViewport">
+            <div class="canvas-shell" id="canvasShell">
+              <canvas id="imageCanvas"></canvas>
+              <canvas id="maskCanvas"></canvas>
+              <div class="brush-cursor" id="brushCursor" aria-hidden="true"></div>
+            </div>
+            <div class="empty-instruction" id="emptyInstruction">
+              <span>01</span><p>用画笔完整覆盖水印<br />可多涂出一点边缘</p>
+            </div>
+          </div>
+        </div>
+
+        <aside class="control-panel">
+          <div class="panel-section">
+            <p class="section-label">画笔尺寸</p>
+            <div class="range-row"><input id="brushSize" type="range" min="4" max="160" value="42" /><output id="brushSizeValue">42 px</output></div>
+          </div>
+          <div class="panel-section status-section">
+            <p class="section-label">修复区域</p>
+            <div class="coverage"><span class="coverage-dot"></span><span id="coverageText">尚未标记</span></div>
+            <button class="text-button" id="clearMaskButton" type="button" disabled>清除选区</button>
+          </div>
+          <div class="panel-section tips">
+            <p class="section-label">得到更好的结果</p>
+            <ul><li>画笔略宽于文字或图标</li><li>分段处理复杂的大水印</li><li>纹理越简单，修复越自然</li></ul>
+          </div>
+          <div class="panel-actions">
+            <button class="restore-button" id="restoreButton" type="button" disabled><span>开始修复</span><span aria-hidden="true">✦</span></button>
+            <button class="compare-button" id="compareButton" type="button" disabled>按住查看原图</button>
+            <button class="download-button" id="downloadButton" type="button" disabled>导出 PNG</button>
+          </div>
+        </aside>
+      </section>
+    </main>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <script src="app.js"></script>
+  </body>
+</html>
