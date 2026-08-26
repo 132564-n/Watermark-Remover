@@ -57,6 +57,9 @@
           <button class="tool" id="eraserTool" type="button" aria-pressed="false" title="擦除选区 (E)">
             <span class="tool-icon eraser-icon" aria-hidden="true"></span><small>擦除</small>
           </button>
+          <button class="tool" id="detectTool" type="button" aria-pressed="false" title="识别相似水印 (D)">
+            <span class="tool-icon detect-icon" aria-hidden="true"></span><small>识别</small>
+          </button>
           <span class="rail-divider"></span>
           <button class="tool" id="undoButton" type="button" disabled title="撤销 (Ctrl+Z)"><span aria-hidden="true">↶</span><small>撤销</small></button>
           <button class="tool" id="redoButton" type="button" disabled title="重做 (Ctrl+Shift+Z)"><span aria-hidden="true">↷</span><small>重做</small></button>
@@ -79,10 +82,11 @@
             <div class="canvas-shell" id="canvasShell">
               <canvas id="imageCanvas"></canvas>
               <canvas id="maskCanvas"></canvas>
+              <div class="detection-layer" id="detectionLayer" aria-label="识别到的水印"></div>
               <div class="brush-cursor" id="brushCursor" aria-hidden="true"></div>
             </div>
             <div class="empty-instruction" id="emptyInstruction">
-              <span>01</span><p>用画笔完整覆盖水印<br />可多涂出一点边缘</p>
+              <span>01</span><p id="instructionText">用画笔完整覆盖水印<br />可多涂出一点边缘</p>
             </div>
           </div>
         </div>
@@ -107,7 +111,7 @@
           </div>
           <div class="panel-section tips">
             <p class="section-label">得到更好的结果</p>
-            <ul><li>画笔只需覆盖水印并多出 2–3 像素</li><li>复杂背景选择 AI 内容修复</li><li>分段处理互不相连的大水印</li></ul>
+            <ul><li>重复水印先用“识别”点击一处字码</li><li>画笔只需比水印多出 2–3 像素</li><li>复杂背景选择 AI 内容修复</li></ul>
           </div>
           <div class="panel-actions">
             <button class="restore-button" id="restoreButton" type="button" disabled><span>开始修复</span><span aria-hidden="true">✦</span></button>
