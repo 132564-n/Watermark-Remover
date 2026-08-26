@@ -124,6 +124,12 @@ try {
   assert.equal(metadata.width, width, 'download width changed');
   assert.equal(metadata.height, height, 'download height changed');
 
+  // Starting another selection must keep the previous repair instead of reverting to the first upload.
+  await page.mouse.move(box.x + 38 * sx, box.y + 38 * sy);
+  await page.mouse.down(); await page.mouse.up();
+  const committedBase = Buffer.from(await page.locator('#imageCanvas').evaluate(canvas => Array.from(canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data)));
+  assert.equal(Buffer.compare(committedBase, output), 0, 'starting a second repair discarded the previous result');
+
   // Regression: a watermark touching the bottom-right area has clean pixels on fewer sides.
   await page.locator('#fileInput').setInputFiles({ name: 'corner-watermark.png', mimeType: 'image/png', buffer: cornerPng });
   await page.waitForFunction(() => document.querySelector('#fileName').textContent === 'corner-watermark.png');

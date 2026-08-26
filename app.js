@@ -144,8 +144,10 @@ function renderStroke(a,b) {
 els.maskCanvas.addEventListener('pointerdown', e => {
   e.preventDefault();
   if (state.restored) {
-    state.restored = false; state.result = null;
-    imageCtx.putImageData(state.original, 0, 0); els.maskCanvas.style.opacity = '1';
+    // Accept the previous repair as the new base so distant watermarks can be fixed in several passes.
+    state.original = new ImageData(new Uint8ClampedArray(state.result.data), state.result.width, state.result.height);
+    imageCtx.putImageData(state.original, 0, 0); maskCtx.clearRect(0,0,els.maskCanvas.width,els.maskCanvas.height);
+    state.history=[];state.historyIndex=-1;pushHistory();els.maskCanvas.style.opacity = '1';
   }
   els.maskCanvas.setPointerCapture(e.pointerId); state.drawing=true; state.last=pointFromEvent(e); renderStroke(state.last,state.last); updateUI();
 });
