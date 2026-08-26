@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node tests/e2e-watermark.mjs && node tests/e2e-complex.mjs"
+    "test": "node tests/e2e-watermark.mjs && node tests/e2e-complex.mjs && node tests/e2e-multi-region.mjs"
   },
   "devDependencies": {
     "playwright": "^1.55.0",

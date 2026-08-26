@@ -248,12 +248,35 @@ function inpaint(source, maskData, w, h) {
   return new ImageData(out, w, h);
 }
 
-function maskBounds(maskData, w, h) {
-  let minX=w,minY=h,maxX=-1,maxY=-1;
-  for(let y=0;y<h;y++)for(let x=0;x<w;x++)if(maskData.data[(y*w+x)*4+3]>20){minX=Math.min(minX,x);minY=Math.min(minY,y);maxX=Math.max(maxX,x);maxY=Math.max(maxY,y);}
-  if(maxX<0)return null;
-  const selectionSize=Math.max(maxX-minX+1,maxY-minY+1),padding=Math.max(48,Math.round(selectionSize*.42));
-  return {x:Math.max(0,minX-padding),y:Math.max(0,minY-padding),right:Math.min(w,maxX+padding+1),bottom:Math.min(h,maxY+padding+1)};
+function maskComponents(maskData, w, h) {
+  const selected=new Uint8Array(w*h);
+  for(let i=0;i<selected.length;i++)if(maskData.data[i*4+3]>20)selected[i]=1;
+  const components=[];
+  for(let start=0;start<selected.length;start++){
+    if(!selected[start])continue;
+    const stack=[start],pixels=[];selected[start]=0;
+    let minX=w,minY=h,maxX=-1,maxY=-1;
+    while(stack.length){
+      const index=stack.pop(),x=index%w,y=(index/w)|0;pixels.push(index);
+      minX=Math.min(minX,x);minY=Math.min(minY,y);maxX=Math.max(maxX,x);maxY=Math.max(maxY,y);
+      for(let ny=Math.max(0,y-1);ny<=Math.min(h-1,y+1);ny++)for(let nx=Math.max(0,x-1);nx<=Math.min(w-1,x+1);nx++){
+        const next=ny*w+nx;if(selected[next]){selected[next]=0;stack.push(next);}
+      }
+    }
+    components.push({pixels,minX,minY,maxX,maxY});
+  }
+  return components.sort((a,b)=>b.pixels.length-a.pixels.length);
+}
+
+function componentBounds(component, w, h) {
+  const selectionSize=Math.max(component.maxX-component.minX+1,component.maxY-component.minY+1);
+  const padding=Math.max(48,Math.round(selectionSize*.42));
+  const targetSize=selectionSize+padding*2;
+  const cropW=Math.min(w,targetSize),cropH=Math.min(h,targetSize);
+  const centerX=(component.minX+component.maxX+1)/2,centerY=(component.minY+component.maxY+1)/2;
+  const x=Math.max(0,Math.min(w-cropW,Math.round(centerX-cropW/2)));
+  const y=Math.max(0,Math.min(h-cropH,Math.round(centerY-cropH/2)));
+  return {x,y,right:x+cropW,bottom:y+cropH};
 }
 
 function dilateMask(mask, w, h, passes=2) {
@@ -266,17 +289,42 @@ function dilateMask(mask, w, h, passes=2) {
   return current;
 }
 
-async function aiInpaint(source, maskData, w, h) {
-  const session=await getAiSession();
-  const bounds=maskBounds(maskData,w,h);
-  if(!bounds)throw new Error('没有可修复的选区');
+function erodeMask(mask, w, h, passes) {
+  let current=mask;
+  for(let pass=0;pass<passes;pass++){
+    const next=current.slice();
+    for(let y=0;y<h;y++)for(let x=0;x<w;x++){
+      const i=y*w+x;
+      if(!current[i])continue;
+      if(x===0||y===0||x===w-1||y===h-1||!current[i-1]||!current[i+1]||!current[i-w]||!current[i+w])next[i]=0;
+    }
+    current=next;
+  }
+  return current;
+}
+
+async function aiInpaintComponent(session, source, component, w, h) {
+  const bounds=componentBounds(component,w,h);
   const cropW=bounds.right-bounds.x,cropH=bounds.bottom-bounds.y,modelSize=512,pixels=modelSize*modelSize;
-  const sourceCanvas=document.createElement('canvas');sourceCanvas.width=w;sourceCanvas.height=h;sourceCanvas.getContext('2d').putImageData(source,0,0);
+  const sourceCanvas=document.createElement('canvas');sourceCanvas.width=w;sourceCanvas.height=h;
+  const sourceCtx=sourceCanvas.getContext('2d',{willReadFrequently:true});sourceCtx.putImageData(source,0,0);
   const inputCanvas=document.createElement('canvas');inputCanvas.width=modelSize;inputCanvas.height=modelSize;
   const inputCtx=inputCanvas.getContext('2d',{willReadFrequently:true});inputCtx.drawImage(sourceCanvas,bounds.x,bounds.y,cropW,cropH,0,0,modelSize,modelSize);
   const inputImage=inputCtx.getImageData(0,0,modelSize,modelSize);
+  let localMask=new Uint8Array(cropW*cropH);
+  for(const index of component.pixels){
+    const x=index%w-bounds.x,y=((index/w)|0)-bounds.y;
+    if(x>=0&&x<cropW&&y>=0&&y<cropH)localMask[y*cropW+x]=1;
+  }
+  const contraction=Math.max(0,Math.round((Number(els.brushSize.value)-42)*.5));
+  const guidedMask=erodeMask(localMask,cropW,cropH,contraction);
+  if(guidedMask.some(value=>value))localMask=guidedMask;
+  const localMaskCanvas=document.createElement('canvas');localMaskCanvas.width=cropW;localMaskCanvas.height=cropH;
+  const localMaskCtx=localMaskCanvas.getContext('2d',{willReadFrequently:true}),localMaskImage=localMaskCtx.createImageData(cropW,cropH);
+  for(let i=0;i<localMask.length;i++)if(localMask[i])localMaskImage.data[i*4+3]=255;
+  localMaskCtx.putImageData(localMaskImage,0,0);
   const scaledMaskCanvas=document.createElement('canvas');scaledMaskCanvas.width=modelSize;scaledMaskCanvas.height=modelSize;
-  const scaledMaskCtx=scaledMaskCanvas.getContext('2d',{willReadFrequently:true});scaledMaskCtx.imageSmoothingEnabled=false;scaledMaskCtx.drawImage(els.maskCanvas,bounds.x,bounds.y,cropW,cropH,0,0,modelSize,modelSize);
+  const scaledMaskCtx=scaledMaskCanvas.getContext('2d',{willReadFrequently:true});scaledMaskCtx.imageSmoothingEnabled=false;scaledMaskCtx.drawImage(localMaskCanvas,0,0,cropW,cropH,0,0,modelSize,modelSize);
   const scaledMaskData=scaledMaskCtx.getImageData(0,0,modelSize,modelSize).data;
   let binaryMask=new Uint8Array(pixels);
   for(let i=0;i<pixels;i++)if(scaledMaskData[i*4+3]>20)binaryMask[i]=1;
@@ -304,12 +352,28 @@ async function aiInpaint(source, maskData, w, h) {
   const nativePatch=document.createElement('canvas');nativePatch.width=cropW;nativePatch.height=cropH;
   const nativeCtx=nativePatch.getContext('2d',{willReadFrequently:true});nativeCtx.drawImage(inputCanvas,0,0,cropW,cropH);
   const nativeData=nativeCtx.getImageData(0,0,cropW,cropH).data;
-  let fullMask=new Uint8Array(w*h);for(let i=0;i<w*h;i++)if(maskData.data[i*4+3]>20)fullMask[i]=1;fullMask=dilateMask(fullMask,w,h,2);
+  const innerMask=dilateMask(localMask,cropW,cropH,2);
+  const featherOne=dilateMask(innerMask,cropW,cropH,1),featherTwo=dilateMask(featherOne,cropW,cropH,1);
   const result=new ImageData(new Uint8ClampedArray(source.data),w,h);
   for(let y=0;y<cropH;y++)for(let x=0;x<cropW;x++){
-    const target=(bounds.y+y)*w+bounds.x+x;if(!fullMask[target])continue;const from=(y*cropW+x)*4,to=target*4;
-    result.data[to]=nativeData[from];result.data[to+1]=nativeData[from+1];result.data[to+2]=nativeData[from+2];
+    const maskIndex=y*cropW+x,blend=innerMask[maskIndex]?1:featherOne[maskIndex]?.55:featherTwo[maskIndex]?.25:0;
+    if(!blend)continue;const target=(bounds.y+y)*w+bounds.x+x,from=maskIndex*4,to=target*4;
+    for(let channel=0;channel<3;channel++)result.data[to+channel]=Math.round(source.data[to+channel]*(1-blend)+nativeData[from+channel]*blend);
   }
+  return result;
+}
+
+async function aiInpaint(source, maskData, w, h) {
+  const session=await getAiSession(),components=maskComponents(maskData,w,h);
+  if(!components.length)throw new Error('没有可修复的选区');
+  const combined={pixels:[],minX:w,minY:h,maxX:-1,maxY:-1};
+  for(const component of components){
+    for(const index of component.pixels)combined.pixels.push(index);
+    combined.minX=Math.min(combined.minX,component.minX);combined.minY=Math.min(combined.minY,component.minY);
+    combined.maxX=Math.max(combined.maxX,component.maxX);combined.maxY=Math.max(combined.maxY,component.maxY);
+  }
+  updateModelStatus('AI 正在重建选区内容…','loading');
+  const result=await aiInpaintComponent(session,source,combined,w,h);
   updateModelStatus('AI 模型已就绪，图片仍在本机处理','ready');
   return result;
 }
