@@ -8,12 +8,18 @@ const els = {
   undo: $('undoButton'), redo: $('redoButton'), clear: $('clearMaskButton'), restore: $('restoreButton'),
   compare: $('compareButton'), download: $('downloadButton'), coverageText: $('coverageText'),
   coverageDot: document.querySelector('.coverage-dot'), emptyInstruction: $('emptyInstruction'),
-  fileName: $('fileName'), imageMeta: $('imageMeta'), zoomValue: $('zoomValue'), toast: $('toast')
+  fileName: $('fileName'), imageMeta: $('imageMeta'), zoomValue: $('zoomValue'), toast: $('toast'),
+  aiMode: $('aiModeButton'), fastMode: $('fastModeButton'), modelStatus: $('modelStatus')
 };
 
 const imageCtx = els.imageCanvas.getContext('2d', { willReadFrequently: true });
 const maskCtx = els.maskCanvas.getContext('2d', { willReadFrequently: true });
-const state = { original: null, result: null, fileName: '', tool: 'brush', drawing: false, last: null, zoom: 1, fitZoom: 1, history: [], historyIndex: -1, hasMask: false, restored: false };
+const state = { original: null, result: null, fileName: '', tool: 'brush', mode: 'ai', drawing: false, processing: false, last: null, zoom: 1, fitZoom: 1, history: [], historyIndex: -1, hasMask: false, restored: false };
+const AI_RUNTIME_URL = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/ort.min.js';
+const AI_WASM_PATH = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/';
+const AI_MODEL_URL = 'https://huggingface.co/g-ronimo/lama/resolve/main/lama_512_int8.onnx';
+let aiSession = null;
+let aiSessionPromise = null;
 
 function toast(message) {
   els.toast.textContent = message; els.toast.classList.add('show');
@@ -80,6 +86,51 @@ els.eraser.addEventListener('click', () => selectTool('eraser'));
 els.brushSize.addEventListener('input', () => { els.brushSizeValue.value = `${els.brushSize.value} px`; updateCursorSize(); });
 function updateCursorSize() { const size = Number(els.brushSize.value) * state.zoom; els.cursor.style.width = `${size}px`; els.cursor.style.height = `${size}px`; }
 
+function selectMode(mode) {
+  if (state.processing) return;
+  state.mode = mode;
+  [els.aiMode, els.fastMode].forEach(button => {
+    const active = button === (mode === 'ai' ? els.aiMode : els.fastMode);
+    button.classList.toggle('active', active); button.setAttribute('aria-pressed', active);
+  });
+  updateModelStatus(); updateUI();
+}
+els.aiMode.addEventListener('click', () => selectMode('ai'));
+els.fastMode.addEventListener('click', () => selectMode('fast'));
+
+function updateModelStatus(message, kind) {
+  els.modelStatus.className = `model-status${kind ? ` ${kind}` : ''}`;
+  if (message) els.modelStatus.lastChild.textContent = message;
+  else if (state.mode === 'fast') els.modelStatus.lastChild.textContent = '无需加载模型，适合简单背景';
+  else if (aiSession) { els.modelStatus.classList.add('ready'); els.modelStatus.lastChild.textContent = 'AI 模型已就绪，图片仍在本机处理'; }
+  else els.modelStatus.lastChild.textContent = '首次使用需加载约 62 MB 模型';
+}
+
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    if (window.ort) return resolve();
+    const script = document.createElement('script'); script.src = src; script.async = true;
+    script.onload = resolve; script.onerror = () => reject(new Error('推理组件加载失败'));
+    document.head.appendChild(script);
+  });
+}
+
+async function getAiSession() {
+  if (aiSession) return aiSession;
+  if (aiSessionPromise) return aiSessionPromise;
+  aiSessionPromise = (async () => {
+    updateModelStatus('正在加载 AI 推理组件…', 'loading');
+    await loadScript(AI_RUNTIME_URL);
+    window.ort.env.wasm.wasmPaths = AI_WASM_PATH;
+    window.ort.env.wasm.numThreads = 1;
+    updateModelStatus('正在下载并初始化模型（约 62 MB）…', 'loading');
+    aiSession = await window.ort.InferenceSession.create(AI_MODEL_URL, { executionProviders: ['wasm'], graphOptimizationLevel: 'all' });
+    updateModelStatus('AI 模型已就绪，图片仍在本机处理', 'ready');
+    return aiSession;
+  })().catch(error => { aiSessionPromise = null; updateModelStatus('AI 模型加载失败，请重试或使用快速填充', 'error'); throw error; });
+  return aiSessionPromise;
+}
+
 function pointFromEvent(e) {
   const r = els.maskCanvas.getBoundingClientRect();
   return { x:(e.clientX-r.left) * els.maskCanvas.width/r.width, y:(e.clientY-r.top) * els.maskCanvas.height/r.height };
@@ -120,9 +171,11 @@ els.clear.addEventListener('click',()=>{maskCtx.clearRect(0,0,els.maskCanvas.wid
 function updateUI(){
   const data=maskCtx.getImageData(0,0,els.maskCanvas.width,els.maskCanvas.height).data; state.hasMask=maskHasPixels(data);
   els.undo.disabled=state.historyIndex<=0; els.redo.disabled=state.historyIndex>=state.history.length-1; els.clear.disabled=!state.hasMask;
-  els.restore.disabled=!state.hasMask; els.compare.disabled=!state.restored; els.download.disabled=!state.restored;
+  els.restore.disabled=!state.hasMask||state.processing; els.compare.disabled=!state.restored||state.processing; els.download.disabled=!state.restored||state.processing;
+  els.aiMode.disabled=state.processing; els.fastMode.disabled=state.processing;
   els.coverageText.textContent=state.hasMask?'选区已就绪':'尚未标记'; els.coverageDot.classList.toggle('ready',state.hasMask);
-  els.emptyInstruction.hidden=state.hasMask; if(!state.restored) { els.maskCanvas.style.opacity='1'; els.restore.querySelector('span').textContent='开始修复'; }
+  els.emptyInstruction.hidden=state.hasMask;
+  if(!state.restored && !state.processing) { els.maskCanvas.style.opacity='1'; els.restore.querySelector('span').textContent=state.mode==='ai'?'开始 AI 修复':'开始快速修复'; }
 }
 
 function inpaint(source, maskData, w, h) {
@@ -193,13 +246,82 @@ function inpaint(source, maskData, w, h) {
   return new ImageData(out, w, h);
 }
 
-els.restore.addEventListener('click',()=>{
-  els.restore.disabled=true; els.restore.querySelector('span').textContent='正在修复…';
-  setTimeout(()=>{
+function maskBounds(maskData, w, h) {
+  let minX=w,minY=h,maxX=-1,maxY=-1;
+  for(let y=0;y<h;y++)for(let x=0;x<w;x++)if(maskData.data[(y*w+x)*4+3]>20){minX=Math.min(minX,x);minY=Math.min(minY,y);maxX=Math.max(maxX,x);maxY=Math.max(maxY,y);}
+  if(maxX<0)return null;
+  const selectionSize=Math.max(maxX-minX+1,maxY-minY+1),padding=Math.max(48,Math.round(selectionSize*.42));
+  return {x:Math.max(0,minX-padding),y:Math.max(0,minY-padding),right:Math.min(w,maxX+padding+1),bottom:Math.min(h,maxY+padding+1)};
+}
+
+function dilateMask(mask, w, h, passes=2) {
+  let current=mask;
+  for(let pass=0;pass<passes;pass++){
+    const next=current.slice();
+    for(let y=1;y<h-1;y++)for(let x=1;x<w-1;x++){const i=y*w+x;if(!current[i]&&(current[i-1]||current[i+1]||current[i-w]||current[i+w]))next[i]=1;}
+    current=next;
+  }
+  return current;
+}
+
+async function aiInpaint(source, maskData, w, h) {
+  const session=await getAiSession();
+  const bounds=maskBounds(maskData,w,h);
+  if(!bounds)throw new Error('没有可修复的选区');
+  const cropW=bounds.right-bounds.x,cropH=bounds.bottom-bounds.y,modelSize=512,pixels=modelSize*modelSize;
+  const sourceCanvas=document.createElement('canvas');sourceCanvas.width=w;sourceCanvas.height=h;sourceCanvas.getContext('2d').putImageData(source,0,0);
+  const inputCanvas=document.createElement('canvas');inputCanvas.width=modelSize;inputCanvas.height=modelSize;
+  const inputCtx=inputCanvas.getContext('2d',{willReadFrequently:true});inputCtx.drawImage(sourceCanvas,bounds.x,bounds.y,cropW,cropH,0,0,modelSize,modelSize);
+  const inputImage=inputCtx.getImageData(0,0,modelSize,modelSize);
+  const scaledMaskCanvas=document.createElement('canvas');scaledMaskCanvas.width=modelSize;scaledMaskCanvas.height=modelSize;
+  const scaledMaskCtx=scaledMaskCanvas.getContext('2d',{willReadFrequently:true});scaledMaskCtx.imageSmoothingEnabled=false;scaledMaskCtx.drawImage(els.maskCanvas,bounds.x,bounds.y,cropW,cropH,0,0,modelSize,modelSize);
+  const scaledMaskData=scaledMaskCtx.getImageData(0,0,modelSize,modelSize).data;
+  let binaryMask=new Uint8Array(pixels);
+  for(let i=0;i<pixels;i++)if(scaledMaskData[i*4+3]>20)binaryMask[i]=1;
+  binaryMask=dilateMask(binaryMask,modelSize,modelSize,3);
+
+  const tensorData=new Float32Array(pixels*4);
+  for(let i=0;i<pixels;i++){
+    const selected=binaryMask[i];
+    tensorData[i]=selected?0:inputImage.data[i*4]/255;
+    tensorData[pixels+i]=selected?0:inputImage.data[i*4+1]/255;
+    tensorData[pixels*2+i]=selected?0:inputImage.data[i*4+2]/255;
+    tensorData[pixels*3+i]=selected;
+  }
+  updateModelStatus('AI 正在重建选区内容…','loading');
+  const feeds={[session.inputNames[0]]:new window.ort.Tensor('float32',tensorData,[1,4,modelSize,modelSize])};
+  const outputs=await session.run(feeds),output=outputs[session.outputNames[0]].data;
+  const patchImage=inputCtx.createImageData(modelSize,modelSize);
+  for(let i=0;i<pixels;i++){
+    patchImage.data[i*4]=Math.max(0,Math.min(255,Math.round(output[i]*255)));
+    patchImage.data[i*4+1]=Math.max(0,Math.min(255,Math.round(output[pixels+i]*255)));
+    patchImage.data[i*4+2]=Math.max(0,Math.min(255,Math.round(output[pixels*2+i]*255)));
+    patchImage.data[i*4+3]=255;
+  }
+  inputCtx.putImageData(patchImage,0,0);
+  const nativePatch=document.createElement('canvas');nativePatch.width=cropW;nativePatch.height=cropH;
+  const nativeCtx=nativePatch.getContext('2d',{willReadFrequently:true});nativeCtx.drawImage(inputCanvas,0,0,cropW,cropH);
+  const nativeData=nativeCtx.getImageData(0,0,cropW,cropH).data;
+  let fullMask=new Uint8Array(w*h);for(let i=0;i<w*h;i++)if(maskData.data[i*4+3]>20)fullMask[i]=1;fullMask=dilateMask(fullMask,w,h,2);
+  const result=new ImageData(new Uint8ClampedArray(source.data),w,h);
+  for(let y=0;y<cropH;y++)for(let x=0;x<cropW;x++){
+    const target=(bounds.y+y)*w+bounds.x+x;if(!fullMask[target])continue;const from=(y*cropW+x)*4,to=target*4;
+    result.data[to]=nativeData[from];result.data[to+1]=nativeData[from+1];result.data[to+2]=nativeData[from+2];
+  }
+  updateModelStatus('AI 模型已就绪，图片仍在本机处理','ready');
+  return result;
+}
+
+els.restore.addEventListener('click',async()=>{
+  if(state.processing||!state.hasMask)return;
+  state.processing=true;state.restored=false;els.restore.querySelector('span').textContent=state.mode==='ai'?'正在准备 AI…':'正在快速修复…';updateUI();
+  await new Promise(resolve=>requestAnimationFrame(()=>setTimeout(resolve,20)));
+  try{
     const mask=maskCtx.getImageData(0,0,els.maskCanvas.width,els.maskCanvas.height);
-    state.result=inpaint(state.original,mask,els.imageCanvas.width,els.imageCanvas.height); imageCtx.putImageData(state.result,0,0);
-    els.maskCanvas.style.opacity='0';state.restored=true;els.restore.querySelector('span').textContent='重新修复';updateUI();toast('修复完成，可按住按钮对比原图');
-  },30);
+    state.result=state.mode==='ai'?await aiInpaint(state.original,mask,els.imageCanvas.width,els.imageCanvas.height):inpaint(state.original,mask,els.imageCanvas.width,els.imageCanvas.height);
+    imageCtx.putImageData(state.result,0,0);els.maskCanvas.style.opacity='0';state.restored=true;els.restore.querySelector('span').textContent='重新修复';toast(state.mode==='ai'?'AI 修复完成，可按住按钮对比原图':'快速修复完成，可按住按钮对比原图');
+  }catch(error){updateModelStatus(error.message||'AI 修复失败','error');toast('AI 修复失败，请重试或切换快速填充');}
+  finally{state.processing=false;updateUI();}
 });
 function showOriginal(show){if(!state.restored)return;imageCtx.putImageData(show?state.original:state.result,0,0);els.compare.textContent=show?'正在查看原图':'按住查看原图';}
 ['pointerdown','pointerenter'].forEach(t=>els.compare.addEventListener(t,e=>{if(t==='pointerenter'&&e.buttons!==1)return;showOriginal(true);}));

@@ -76,6 +76,8 @@ try {
   await page.goto(targetUrl);
   await page.locator('#fileInput').setInputFiles({ name: 'watermarked.png', mimeType: 'image/png', buffer: inputPng });
   await page.locator('#editorPanel').waitFor({ state: 'visible' });
+  if (process.env.WATERMARK_UI_SCREENSHOT) await page.screenshot({ path: process.env.WATERMARK_UI_SCREENSHOT, fullPage: true });
+  await page.locator('#fastModeButton').click();
   await page.locator('#brushSize').evaluate(el => { el.value = '32'; el.dispatchEvent(new Event('input')); });
 
   const box = await page.locator('#maskCanvas').boundingBox();

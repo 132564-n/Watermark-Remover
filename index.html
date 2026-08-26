@@ -88,6 +88,14 @@
         </div>
 
         <aside class="control-panel">
+          <div class="panel-section mode-section">
+            <p class="section-label">修复模式</p>
+            <div class="mode-switch" role="group" aria-label="修复模式">
+              <button class="mode-button active" id="aiModeButton" type="button" aria-pressed="true"><strong>AI 内容修复</strong><small>人物与复杂背景</small></button>
+              <button class="mode-button" id="fastModeButton" type="button" aria-pressed="false"><strong>快速填充</strong><small>纯色与渐变</small></button>
+            </div>
+            <p class="model-status" id="modelStatus"><span></span>首次使用需加载约 62 MB 模型</p>
+          </div>
           <div class="panel-section">
             <p class="section-label">画笔尺寸</p>
             <div class="range-row"><input id="brushSize" type="range" min="4" max="160" value="42" /><output id="brushSizeValue">42 px</output></div>
@@ -99,7 +107,7 @@
           </div>
           <div class="panel-section tips">
             <p class="section-label">得到更好的结果</p>
-            <ul><li>画笔略宽于文字或图标</li><li>分段处理复杂的大水印</li><li>纹理越简单，修复越自然</li></ul>
+            <ul><li>完整覆盖水印并多涂 2–3 像素</li><li>复杂背景选择 AI 内容修复</li><li>分段处理互不相连的大水印</li></ul>
           </div>
           <div class="panel-actions">
             <button class="restore-button" id="restoreButton" type="button" disabled><span>开始修复</span><span aria-hidden="true">✦</span></button>
