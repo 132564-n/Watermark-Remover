@@ -72,7 +72,8 @@ page.on('console', msg => { if (msg.type() === 'error') consoleErrors.push(msg.t
 page.on('pageerror', err => consoleErrors.push(err.message));
 
 try {
-  await page.goto(new URL('../index.html', import.meta.url).href);
+  const targetUrl = process.env.WATERMARK_TEST_URL || new URL('../index.html', import.meta.url).href;
+  await page.goto(targetUrl);
   await page.locator('#fileInput').setInputFiles({ name: 'watermarked.png', mimeType: 'image/png', buffer: inputPng });
   await page.locator('#editorPanel').waitFor({ state: 'visible' });
   await page.locator('#brushSize').evaluate(el => { el.value = '32'; el.dispatchEvent(new Event('input')); });
