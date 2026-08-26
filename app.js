@@ -16,9 +16,12 @@ const els = {
 const imageCtx = els.imageCanvas.getContext('2d', { willReadFrequently: true });
 const maskCtx = els.maskCanvas.getContext('2d', { willReadFrequently: true });
 const state = { original: null, result: null, fileName: '', tool: 'brush', mode: 'ai', drawing: false, processing: false, recognizing: false, last: null, zoom: 1, fitZoom: 1, history: [], historyIndex: -1, hasMask: false, restored: false, detections: [], detectionTemplate: null };
-const AI_RUNTIME_URL = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/ort.min.js';
-const AI_WASM_PATH = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/';
-const AI_MODEL_URL = 'https://huggingface.co/g-ronimo/lama/resolve/main/lama_512_int8.onnx';
+const AI_RUNTIME_URL = './vendor/ort.min.js';
+const AI_WASM_PATH = {
+  'ort-wasm-simd-threaded.jsep.mjs': new URL('./vendor/ort-wasm-simd-threaded.jsep.js',window.location.href).href,
+  'ort-wasm-simd-threaded.jsep.wasm': new URL('./vendor/ort-wasm-simd-threaded.jsep.wasm',window.location.href).href
+};
+const AI_MODEL_URL = './models/lama_512_int8.onnx';
 let aiSession = null;
 let aiSessionPromise = null;
 
@@ -172,6 +175,7 @@ function recognitionData(source,w,h) {
 function templateFeatures(highPass,workW,x0,y0,tw,th) {
   const ranked=[];
   for(let y=2;y<th-2;y++)for(let x=2;x<tw-2;x++){
+    if(Math.abs(y-th/2+(x-tw/2)*.45)>th*.32)continue;
     const value=highPass[(y0+y)*workW+x0+x],strength=Math.abs(value);
     if(strength>3)ranked.push({x,y,value,strength});
   }
@@ -193,6 +197,19 @@ function templateScore(features,highPass,workW,workH,x,y) {
   return visible>=features.length*.55&&energy?dot/Math.sqrt(templateEnergy*energy):-1;
 }
 
+function neutralTemplateScore(features,data,seedX,seedY,x,y) {
+  let matched=0,total=0;
+  for(const feature of features){
+    const seed=(seedY+feature.y)*data.workW+seedX+feature.x;
+    if(data.chroma[seed]>=68||data.gray[seed]<=72)continue;
+    const px=x+feature.x,py=y+feature.y;if(px<0||py<0||px>=data.workW||py>=data.workH)continue;
+    total++;
+    const index=py*data.workW+px,value=data.highPass[index];
+    if(data.chroma[index]<68&&data.gray[index]>72&&Math.sign(value)===Math.sign(feature.value))matched++;
+  }
+  return total?matched/total:0;
+}
+
 function dilateBinary(mask,w,h,passes=2) {
   let current=mask;
   for(let pass=0;pass<passes;pass++){
@@ -209,6 +226,7 @@ function createRecognitionMask(highPass,gray,chroma,workW,detections,tw,th) {
   let mask=new Uint8Array(tw*th),count=0;
   const needed=Math.max(1,Math.ceil(detections.length*.6));
   for(let y=1;y<th-1;y++)for(let x=1;x<tw-1;x++){
+    if(Math.abs(y-th/2+(x-tw/2)*.45)>th*.32)continue;
     const seed=highPass[(detections[0].y+y)*workW+detections[0].x+x];
     if(Math.abs(seed)<3)continue;
     let consistent=0,neutral=0,strength=0;
@@ -225,7 +243,7 @@ function createRecognitionMask(highPass,gray,chroma,workW,detections,tw,th) {
       if(Math.abs(highPass[index])>8&&chroma[index]<68&&gray[index]>72)mask[y*tw+x]=1;
     }
   }
-  mask=dilateBinary(mask,tw,th,2);
+  mask=dilateBinary(mask,tw,th,1);
   const canvas=document.createElement('canvas');canvas.width=tw;canvas.height=th;
   const ctx=canvas.getContext('2d'),image=ctx.createImageData(tw,th);
   for(let i=0;i<mask.length;i++)if(mask[i]){image.data[i*4]=47;image.data[i*4+1]=103;image.data[i*4+2]=246;image.data[i*4+3]=122;}
@@ -234,8 +252,8 @@ function createRecognitionMask(highPass,gray,chroma,workW,detections,tw,th) {
 }
 
 function findSimilarWatermarks(source,w,h,point) {
-  const data=recognitionData(source,w,h),shortSide=Math.min(data.workW,data.workH);
-  const tw=Math.max(96,Math.min(220,Math.round(shortSide*.36))),th=Math.max(42,Math.round(tw*.42));
+  const data=recognitionData(source,w,h),shortSide=Math.min(data.workW,data.workH),longSide=Math.max(data.workW,data.workH);
+  const tw=Math.max(108,Math.min(180,Math.round(Math.min(shortSide*.34,longSide*.19)))),th=Math.max(40,Math.round(tw*.38));
   const seedX=Math.max(0,Math.min(data.workW-tw,Math.round(point.x*data.scale-tw/2)));
   const seedY=Math.max(0,Math.min(data.workH-th,Math.round(point.y*data.scale-th/2)));
   const features=templateFeatures(data.highPass,data.workW,seedX,seedY,tw,th);
@@ -245,14 +263,22 @@ function findSimilarWatermarks(source,w,h,point) {
   const minX=-Math.round(tw*.45),maxX=data.workW-Math.round(tw*.55),minY=-Math.round(th*.45),maxY=data.workH-Math.round(th*.55);
   for(let y=minY;y<=maxY;y+=step)for(let x=minX;x<=maxX;x+=step){
     const score=templateScore(features,data.highPass,data.workW,data.workH,x,y);
-    if(score>.2)candidates.push({x,y,score,selected:true});
+    if(score>.16)candidates.push({x,y,score,selected:true});
   }
   candidates.sort((a,b)=>b.score-a.score);
   const detections=[];
   for(const candidate of candidates){
-    if(candidate.score<.34)break;
-    const overlaps=detections.some(item=>Math.abs(item.x-candidate.x)<tw*.7&&Math.abs(item.y-candidate.y)<th*.7);
-    if(!overlaps){detections.push(candidate);if(detections.length>=24)break;}
+    if(candidate.score<.18)break;
+    let refined=candidate;
+    if(candidate.score<1){
+      for(let y=candidate.y-step;y<=candidate.y+step;y++)for(let x=candidate.x-step;x<=candidate.x+step;x++){
+        const score=templateScore(features,data.highPass,data.workW,data.workH,x,y);
+        if(score>refined.score)refined={x,y,score,selected:true};
+      }
+    }
+    if(refined.score<.5&&neutralTemplateScore(features,data,seedX,seedY,refined.x,refined.y)<.55)continue;
+    const overlaps=detections.some(item=>Math.abs(item.x-refined.x)<tw*.7&&Math.abs(item.y-refined.y)<th*.7);
+    if(!overlaps){detections.push(refined);if(detections.length>=24)break;}
   }
   const seedPresent=detections.some(item=>Math.abs(item.x-seedX)<tw*.35&&Math.abs(item.y-seedY)<th*.35);
   if(!seedPresent)detections.unshift({x:seedX,y:seedY,score:1,selected:true});
@@ -428,6 +454,17 @@ function inpaint(source, maskData, w, h) {
   return new ImageData(out, w, h);
 }
 
+function removeRecognizedWatermarks(source,maskData,w,h) {
+  updateModelStatus('正在沿字形边缘快速修复…','loading');
+  const repaired=inpaint(source,maskData,w,h),out=new Uint8ClampedArray(source.data);
+  for(let pixel=0;pixel<w*h;pixel++){
+    if(maskData.data[pixel*4+3]<=20)continue;
+    const index=pixel*4;
+    out[index]=repaired.data[index];out[index+1]=repaired.data[index+1];out[index+2]=repaired.data[index+2];
+  }
+  updateModelStatus('快速修复已完成，图片仍在本机处理','ready');
+  return new ImageData(out,w,h);
+}
 function maskComponents(maskData, w, h) {
   const selected=new Uint8Array(w*h);
   for(let i=0;i<selected.length;i++)if(maskData.data[i*4+3]>20)selected[i]=1;
@@ -483,7 +520,7 @@ function erodeMask(mask, w, h, passes) {
   return current;
 }
 
-async function aiInpaintComponent(session, source, component, w, h) {
+async function aiInpaintComponent(session, source, component, w, h, modelDilation=3) {
   const bounds=componentBounds(component,w,h);
   const cropW=bounds.right-bounds.x,cropH=bounds.bottom-bounds.y,modelSize=512,pixels=modelSize*modelSize;
   const sourceCanvas=document.createElement('canvas');sourceCanvas.width=w;sourceCanvas.height=h;
@@ -508,7 +545,7 @@ async function aiInpaintComponent(session, source, component, w, h) {
   const scaledMaskData=scaledMaskCtx.getImageData(0,0,modelSize,modelSize).data;
   let binaryMask=new Uint8Array(pixels);
   for(let i=0;i<pixels;i++)if(scaledMaskData[i*4+3]>20)binaryMask[i]=1;
-  binaryMask=dilateMask(binaryMask,modelSize,modelSize,3);
+  binaryMask=dilateMask(binaryMask,modelSize,modelSize,modelDilation);
 
   const tensorData=new Float32Array(pixels*4);
   for(let i=0;i<pixels;i++){
@@ -558,13 +595,40 @@ async function aiInpaint(source, maskData, w, h) {
   return result;
 }
 
+async function aiInpaintRecognized(source,maskData,w,h) {
+  const template=state.detectionTemplate,selected=state.detections.filter(item=>item.selected);
+  if(!template||!selected.length)throw new Error('没有可修复的识别选区');
+  const components=[];
+  for(const detection of selected){
+    const minX=Math.max(0,Math.floor(detection.x/template.scale)),minY=Math.max(0,Math.floor(detection.y/template.scale));
+    const maxX=Math.min(w-1,Math.ceil((detection.x+template.tw)/template.scale)-1),maxY=Math.min(h-1,Math.ceil((detection.y+template.th)/template.scale)-1);
+    const pixels=[];let actualMinX=w,actualMinY=h,actualMaxX=-1,actualMaxY=-1;
+    for(let y=minY;y<=maxY;y++)for(let x=minX;x<=maxX;x++){
+      const index=y*w+x;if(maskData.data[index*4+3]<=20)continue;
+      pixels.push(index);actualMinX=Math.min(actualMinX,x);actualMinY=Math.min(actualMinY,y);actualMaxX=Math.max(actualMaxX,x);actualMaxY=Math.max(actualMaxY,y);
+    }
+    if(pixels.length)components.push({pixels,minX:actualMinX,minY:actualMinY,maxX:actualMaxX,maxY:actualMaxY});
+  }
+  const session=await getAiSession();let result=source;
+  for(let index=0;index<components.length;index++){
+    updateModelStatus(`AI 正在逐处重建水印（${index+1}/${components.length}）…`,'loading');
+    result=await aiInpaintComponent(session,result,components[index],w,h,12);
+  }
+  const clipped=new ImageData(new Uint8ClampedArray(result.data),w,h);
+  for(let i=0;i<w*h;i++)if(maskData.data[i*4+3]<=20){
+    clipped.data[i*4]=source.data[i*4];clipped.data[i*4+1]=source.data[i*4+1];clipped.data[i*4+2]=source.data[i*4+2];
+  }
+  updateModelStatus('AI 模型已就绪，图片仍在本机处理','ready');
+  return clipped;
+}
+
 els.restore.addEventListener('click',async()=>{
   if(state.processing||!state.hasMask)return;
   state.processing=true;state.restored=false;els.restore.querySelector('span').textContent=state.mode==='ai'?'正在准备 AI…':'正在快速修复…';updateUI();
   await new Promise(resolve=>requestAnimationFrame(()=>setTimeout(resolve,20)));
   try{
     const mask=maskCtx.getImageData(0,0,els.maskCanvas.width,els.maskCanvas.height);
-    state.result=state.mode==='ai'?await aiInpaint(state.original,mask,els.imageCanvas.width,els.imageCanvas.height):inpaint(state.original,mask,els.imageCanvas.width,els.imageCanvas.height);
+    state.result=state.detections.length?(state.mode==='ai'?await aiInpaintRecognized(state.original,mask,els.imageCanvas.width,els.imageCanvas.height):await removeRecognizedWatermarks(state.original,mask,els.imageCanvas.width,els.imageCanvas.height)):state.mode==='ai'?await aiInpaint(state.original,mask,els.imageCanvas.width,els.imageCanvas.height):inpaint(state.original,mask,els.imageCanvas.width,els.imageCanvas.height);
     imageCtx.putImageData(state.result,0,0);els.maskCanvas.style.opacity='0';state.restored=true;els.restore.querySelector('span').textContent='重新修复';toast(state.mode==='ai'?'AI 修复完成，可按住按钮对比原图':'快速修复完成，可按住按钮对比原图');
   }catch(error){updateModelStatus(error.message||'AI 修复失败','error');toast('AI 修复失败，请重试或切换快速填充');}
   finally{state.processing=false;updateUI();}
