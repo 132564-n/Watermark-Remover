@@ -16,7 +16,7 @@ const server=createServer((request,response)=>{
 
 await new Promise(resolveListen=>server.listen(0,'127.0.0.1',resolveListen));
 const {port}=server.address(),testUrl=`http://127.0.0.1:${port}/`;
-const tests=['e2e-detection.mjs','e2e-watermark.mjs','e2e-complex.mjs','e2e-multi-region.mjs'];
+const tests=['e2e-detection.mjs','e2e-watermark-matrix.mjs','e2e-watermark.mjs','e2e-complex.mjs','e2e-multi-region.mjs','e2e-ai-fallback.mjs'];
 try{
   for(const test of tests){
     const exitCode=await new Promise((resolveExit,reject)=>{

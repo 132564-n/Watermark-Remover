@@ -172,11 +172,13 @@ function recognitionData(source,w,h) {
   return {scale,workW,workH,highPass,gray,chroma};
 }
 
-function templateFeatures(highPass,workW,x0,y0,tw,th) {
+function templateFeatures(data,x0,y0,tw,th,neutralOnly=true) {
   const ranked=[];
   for(let y=2;y<th-2;y++)for(let x=2;x<tw-2;x++){
     if(Math.abs(y-th/2+(x-tw/2)*.45)>th*.32)continue;
-    const value=highPass[(y0+y)*workW+x0+x],strength=Math.abs(value);
+    const index=(y0+y)*data.workW+x0+x;
+    if(neutralOnly&&(data.chroma[index]>52||data.gray[index]<82))continue;
+    const value=data.highPass[index],strength=Math.abs(value);
     if(strength>3)ranked.push({x,y,value,strength});
   }
   ranked.sort((a,b)=>b.strength-a.strength);
@@ -227,15 +229,15 @@ function createRecognitionMask(highPass,gray,chroma,workW,detections,tw,th) {
   const needed=Math.max(1,Math.ceil(detections.length*.6));
   for(let y=1;y<th-1;y++)for(let x=1;x<tw-1;x++){
     if(Math.abs(y-th/2+(x-tw/2)*.45)>th*.32)continue;
-    const seed=highPass[(detections[0].y+y)*workW+detections[0].x+x];
-    if(Math.abs(seed)<3)continue;
-    let consistent=0,neutral=0,strength=0;
+    const values=[];let neutral=0;
     for(const detection of detections){
       const index=(detection.y+y)*workW+detection.x+x,value=highPass[index];
-      if(Math.abs(value)>3&&Math.sign(value)===Math.sign(seed)){consistent++;strength+=Math.abs(value);}
+      values.push(value);
       if(chroma[index]<68&&gray[index]>72)neutral++;
     }
-    if(consistent>=needed&&neutral>=needed&&strength/consistent>5){mask[y*tw+x]=1;count++;}
+    values.sort((a,b)=>a-b);const middle=values.length>>1,center=values.length%2?values[middle]:(values[middle-1]+values[middle])/2;
+    const deviations=values.map(value=>Math.abs(value-center)).sort((a,b)=>a-b),deviation=deviations.length%2?deviations[middle]:(deviations[middle-1]+deviations[middle])/2;
+    if(neutral>=needed&&Math.abs(center)>1.25&&Math.abs(center)/(deviation+2)>.28){mask[y*tw+x]=1;count++;}
   }
   if(count<tw*th*.012){
     for(let y=1;y<th-1;y++)for(let x=1;x<tw-1;x++){
@@ -256,19 +258,20 @@ function findSimilarWatermarks(source,w,h,point) {
   const tw=Math.max(108,Math.min(180,Math.round(Math.min(shortSide*.34,longSide*.19)))),th=Math.max(40,Math.round(tw*.38));
   const seedX=Math.max(0,Math.min(data.workW-tw,Math.round(point.x*data.scale-tw/2)));
   const seedY=Math.max(0,Math.min(data.workH-th,Math.round(point.y*data.scale-th/2)));
-  const features=templateFeatures(data.highPass,data.workW,seedX,seedY,tw,th);
+  let features=templateFeatures(data,seedX,seedY,tw,th);
+  if(features.length<40)features=templateFeatures(data,seedX,seedY,tw,th,false);
   if(features.length<40)throw new Error('这里的字形特征太少，请点击水印文字中心');
   const step=Math.max(2,Math.round(shortSide/260));
   const candidates=[{x:seedX,y:seedY,score:1,selected:true}];
   const minX=-Math.round(tw*.45),maxX=data.workW-Math.round(tw*.55),minY=-Math.round(th*.45),maxY=data.workH-Math.round(th*.55);
   for(let y=minY;y<=maxY;y+=step)for(let x=minX;x<=maxX;x+=step){
     const score=templateScore(features,data.highPass,data.workW,data.workH,x,y);
-    if(score>.16)candidates.push({x,y,score,selected:true});
+    if(score>.24)candidates.push({x,y,score,selected:true});
   }
   candidates.sort((a,b)=>b.score-a.score);
   const detections=[];
   for(const candidate of candidates){
-    if(candidate.score<.18)break;
+    if(candidate.score<.32)break;
     let refined=candidate;
     if(candidate.score<1){
       for(let y=candidate.y-step;y<=candidate.y+step;y++)for(let x=candidate.x-step;x<=candidate.x+step;x++){
@@ -454,16 +457,62 @@ function inpaint(source, maskData, w, h) {
   return new ImageData(out, w, h);
 }
 
-function removeRecognizedWatermarks(source,maskData,w,h) {
-  updateModelStatus('正在沿字形边缘快速修复…','loading');
-  const repaired=inpaint(source,maskData,w,h),out=new Uint8ClampedArray(source.data);
-  for(let pixel=0;pixel<w*h;pixel++){
-    if(maskData.data[pixel*4+3]<=20)continue;
-    const index=pixel*4;
-    out[index]=repaired.data[index];out[index+1]=repaired.data[index+1];out[index+2]=repaired.data[index+2];
+function exemplarInpaint(source,maskData,w,h) {
+  const size=w*h,out=new Uint8ClampedArray(source.data),masked=new Uint8Array(size),filled=new Uint8Array(size),distance=new Int16Array(size),bestSources=new Int32Array(size),queue=[];
+  distance.fill(-1);bestSources.fill(-1);
+  for(let pixel=0;pixel<size;pixel++)masked[pixel]=maskData.data[pixel*4+3]>20?1:0;
+  for(let y=0;y<h;y++)for(let x=0;x<w;x++){
+    const pixel=y*w+x;if(!masked[pixel])continue;
+    if((x&& !masked[pixel-1])||(x<w-1&&!masked[pixel+1])||(y&&!masked[pixel-w])||(y<h-1&&!masked[pixel+w])){distance[pixel]=1;queue.push(pixel);}
   }
-  updateModelStatus('快速修复已完成，图片仍在本机处理','ready');
+  for(let head=0;head<queue.length;head++){
+    const pixel=queue[head],x=pixel%w,y=(pixel/w)|0;
+    for(const next of [x?pixel-1:-1,x<w-1?pixel+1:-1,y?pixel-w:-1,y<h-1?pixel+w:-1])if(next>=0&&masked[next]&&distance[next]<0){distance[next]=distance[pixel]+1;queue.push(next);}
+  }
+  const searchRadius=18,patchRadius=2;
+  for(const pixel of queue){
+    const x=pixel%w,y=(pixel/w)|0,context=[];
+    for(let oy=-patchRadius;oy<=patchRadius;oy++)for(let ox=-patchRadius;ox<=patchRadius;ox++){
+      if(!ox&&!oy)continue;const nx=x+ox,ny=y+oy;if(nx<0||ny<0||nx>=w||ny>=h)continue;
+      const neighbor=ny*w+nx;if(!masked[neighbor]||filled[neighbor])context.push({ox,oy,index:neighbor*4});
+    }
+    let best=-1,bestScore=Infinity;
+    const evaluate=candidate=>{
+      if(candidate<0||candidate>=size||masked[candidate]||context.length<5)return;
+      const cx=candidate%w,cy=(candidate/w)|0;
+      let score=(cx-x)*(cx-x)+(cy-y)*(cy-y),count=0;
+      for(const sample of context){
+        const sx=cx+sample.ox,sy=cy+sample.oy;if(sx<0||sy<0||sx>=w||sy>=h)continue;
+        const sourceIndex=(sy*w+sx)*4;
+        for(let channel=0;channel<3;channel++){const difference=out[sample.index+channel]-source.data[sourceIndex+channel];score+=difference*difference;}
+        count++;
+      }
+      if(count>=5&&(score/=count)<bestScore){bestScore=score;best=candidate;}
+    };
+    for(const sample of context){
+      const neighbor=(sample.index/4)|0,sourceNeighbor=bestSources[neighbor];
+      if(sourceNeighbor>=0)evaluate(sourceNeighbor+pixel-neighbor);
+    }
+    for(let cy=Math.max(0,y-searchRadius);cy<=Math.min(h-1,y+searchRadius);cy+=2)for(let cx=Math.max(0,x-searchRadius);cx<=Math.min(w-1,x+searchRadius);cx+=2)evaluate(cy*w+cx);
+    const target=pixel*4;
+    if(best>=0){const sourceIndex=best*4;for(let channel=0;channel<3;channel++)out[target+channel]=source.data[sourceIndex+channel];bestSources[pixel]=best;}
+    else if(context.length){for(let channel=0;channel<3;channel++){let sum=0;for(const sample of context)sum+=out[sample.index+channel];out[target+channel]=sum/context.length;}}
+    filled[pixel]=1;
+  }
+  const directional=inpaint(source,maskData,w,h).data;
+  for(let pixel=0;pixel<size;pixel++)if(masked[pixel]){
+    const index=pixel*4;
+    for(let channel=0;channel<3;channel++)out[index+channel]=Math.round(out[index+channel]*.58+directional[index+channel]*.42);
+  }
   return new ImageData(out,w,h);
+}
+
+async function removeRecognizedWatermarks(source,maskData,w,h) {
+  updateModelStatus('正在进行局部纹理匹配修复…','loading');
+  await new Promise(resolve=>requestAnimationFrame(resolve));
+  const repaired=exemplarInpaint(source,maskData,w,h);
+  updateModelStatus('局部纹理修复已完成','ready');
+  return repaired;
 }
 function maskComponents(maskData, w, h) {
   const selected=new Uint8Array(w*h);
@@ -622,14 +671,25 @@ async function aiInpaintRecognized(source,maskData,w,h) {
   return clipped;
 }
 
+async function repairSelection(source,mask,w,h) {
+  if(state.detections.length)return removeRecognizedWatermarks(source,mask,w,h);
+  if(state.mode!=='ai')return inpaint(source,mask,w,h);
+  try{return await aiInpaint(source,mask,w,h);}
+  catch(error){
+    updateModelStatus('AI 不可用，已自动切换轻量修复','error');
+    toast('AI 组件不可用，已自动完成轻量修复');
+    return inpaint(source,mask,w,h);
+  }
+}
+
 els.restore.addEventListener('click',async()=>{
   if(state.processing||!state.hasMask)return;
   state.processing=true;state.restored=false;els.restore.querySelector('span').textContent=state.mode==='ai'?'正在准备 AI…':'正在快速修复…';updateUI();
   await new Promise(resolve=>requestAnimationFrame(()=>setTimeout(resolve,20)));
   try{
     const mask=maskCtx.getImageData(0,0,els.maskCanvas.width,els.maskCanvas.height);
-    state.result=state.detections.length?(state.mode==='ai'?await aiInpaintRecognized(state.original,mask,els.imageCanvas.width,els.imageCanvas.height):await removeRecognizedWatermarks(state.original,mask,els.imageCanvas.width,els.imageCanvas.height)):state.mode==='ai'?await aiInpaint(state.original,mask,els.imageCanvas.width,els.imageCanvas.height):inpaint(state.original,mask,els.imageCanvas.width,els.imageCanvas.height);
-    imageCtx.putImageData(state.result,0,0);els.maskCanvas.style.opacity='0';state.restored=true;els.restore.querySelector('span').textContent='重新修复';toast(state.mode==='ai'?'AI 修复完成，可按住按钮对比原图':'快速修复完成，可按住按钮对比原图');
+    state.result=await repairSelection(state.original,mask,els.imageCanvas.width,els.imageCanvas.height);
+    imageCtx.putImageData(state.result,0,0);els.maskCanvas.style.opacity='0';state.restored=true;els.restore.querySelector('span').textContent='重新修复';toast(state.detections.length?'相似水印修复完成，可按住按钮对比原图':state.mode==='ai'?'AI 修复完成，可按住按钮对比原图':'快速修复完成，可按住按钮对比原图');
   }catch(error){updateModelStatus(error.message||'AI 修复失败','error');toast('AI 修复失败，请重试或切换快速填充');}
   finally{state.processing=false;updateUI();}
 });
